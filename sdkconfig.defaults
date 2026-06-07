@@ -4,10 +4,23 @@
 CONFIG_FREERTOS_UNICORE=y
 CONFIG_FREERTOS_HZ=1000
 
+# ... (保留之前的单核、MAC修复、OTA等配置) ...
+
 # ==========================================
-# 2. 禁用蓝牙 (释放资源)
+# 蓝牙配网核心配置 (NimBLE 极简模式)
 # ==========================================
-CONFIG_BT_ENABLED=n
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n          # 【关键】禁用庞大的 Bluedroid
+CONFIG_BT_NIMBLE_ENABLED=y             # 【关键】启用轻量级 NimBLE
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_DEFAULT=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1     # 仅允许 1 个手机连接，省内存
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y     # 仅作为外设 (GATT Server)
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+
+# Wi-Fi 与 BLE 软件共存 (单核必备)
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
 # ==========================================
 # 3. 【核心修复】强制忽略 eFuse MAC CRC 错误
@@ -21,3 +34,18 @@ CONFIG_ESP_MAC_IGNORE_MAC_CRC_ERROR=y
 # ==========================================
 CONFIG_ESP_MAC_USE_CUSTOM_MAC_AS_BASE_MAC=y
 CONFIG_ESP_MAC_CUSTOM_MAC_ADDRESS="24:0a:c4:12:34:56"
+
+# ... (保留之前的单核、MAC 修复、禁用蓝牙等配置) ...
+
+# ==========================================
+# OTA 核心配置
+# ==========================================
+# 启用应用回滚机制 (防止新固件有 Bug 导致变砖，首次启动成功后需标记为有效)
+CONFIG_APP_ROLLBACK_ENABLE=y
+
+# 启用 HTTP Server (用于接收固件上传)
+CONFIG_ESP_HTTP_SERVER_ENABLE=y
+
+# 修复 Flash 大小识别错误
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

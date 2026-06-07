@@ -6,5 +6,5 @@ phy_init,    data, phy,      0x010000, 0x001000,
 factory,     app,  factory,  0x020000, 0x120000,  
 ota_0,       app,  ota_0,    0x140000, 0x120000,  
 ota_1,       app,  ota_1,    0x260000, 0x120000,  
-coredump,    data, coredump, 0x3E0000, 0x020000,  
+coredump,    data, coredump, 0x380000, 0x020000,  
 # 总计: 0x400000 (4MB 完美对齐，无浪费)
