@@ -5,7 +5,7 @@
  */
 #pragma once
 
-#include "../gb46750/encoder.h"
+#include "../encoder.h"
 
 class WiFi_TX {
 public:

@@ -1,139 +1,105 @@
 /*
  * XC-RemoteID - GB 46750-2025 compliant Remote ID firmware
- * Main entry point
+ * Main entry point (Ultra-Minimal, WiFi ONLY, Pure ESP-IDF)
  */
+#include <stdio.h>
+#include <string.h>
 
-#include <Arduino.h>
-#include "system/parameters.h"
-#include "system/led.h"
-#include "system/interlock.h"
-#include "transport/mavlink_input.h"
-#include "broadcast/ble_tx.h"
+// ==========================================
+// ESP-IDF 原生头文件
+// ==========================================
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_mac.h"
+
+// ==========================================
+// 业务模块头文件 (已移除 BLE 和 WebServer)
+// ==========================================
+#include "parameters.h"
 #include "broadcast/wifi_tx.h"
-#include "storage/flight_log.h"
-#include "webserver/web_server.h"
+#include "mock_data.h"
 
-#ifdef MOCK_DATA
-#include "mock/mock_data.h"
-static RIDData mock_rid_data{};
-#endif
+static const char* TAG = "MAIN";
 
-static MAVLinkInput mavlink;
-static BLE_TX       ble;
+// ==========================================
+// 全局实例
+// ==========================================
 static WiFi_TX      wifi_tx;
-static XCWebServer  webserver;
+static RIDData      mock_rid_data{};
 
-enum class BootMode { NORMAL, CONFIG };
-static BootMode boot_mode = BootMode::NORMAL;
-
-static bool is_config_mode_requested()
-{
-    // BOOT 键（GPIO9）上电时按住进入配置模式
-    pinMode(9, INPUT_PULLUP);
-    delay(50);
-    return (digitalRead(9) == LOW);
+// ==========================================
+// 辅助函数：修复 S0WD 的 MAC 地址
+// ==========================================
+static void set_custom_mac_address() {
+    uint8_t custom_mac[6] = {0x24, 0x0A, 0xC4, 0x12, 0x34, 0x56};
+    esp_err_t err = esp_base_mac_addr_set(custom_mac);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "MAC address overridden successfully!");
+    } else {
+        ESP_LOGE(TAG, "Failed to override MAC: %d", err);
+    }
 }
 
-void setup()
-{
-    Serial.begin(115200);
-
-    Parameters::init();
-    Led::init();
-    Led::set(Led::State::INIT);
-
-    // ── 判断启动模式 ──────────────────────────────────────────────────────────
-    // CONFIG 模式：首次上电（未配置）或上电时按住 BOOT 键
-    // NORMAL 模式：已配置且未按 BOOT 键
-#ifdef MOCK_DATA
-    // MOCK 模式跳过配置检查，强制进入 NORMAL
-    Serial.println("[XC-RID] MOCK mode, skip config check");
-#else
-    if (is_config_mode_requested() || !Parameters::is_configured()) {
-        boot_mode = BootMode::CONFIG;
-        Serial.println("[XC-RID] CONFIG mode - AP: XC-RID-xxxx / 12345678");
-        Led::set(Led::State::CONFIG);
-        webserver.start_ap();
+// ==========================================
+// FreeRTOS 任务：WiFi 广播循环
+// ==========================================
+void wifi_broadcast_task(void *pvParameters) {
+    ESP_LOGI(TAG, "Entering WiFi-Only Broadcast Mode...");
+    
+    // 1. 初始化 Wi-Fi 广播接口
+    bool wifi_ok = wifi_tx.init();
+    if (!wifi_ok) {
+        ESP_LOGE(TAG, "WiFi TX init failed! System halted.");
+        vTaskDelete(NULL); // 初始化失败则删除任务
         return;
     }
-#endif
+    ESP_LOGI(TAG, "WiFi TX initialized successfully.");
 
-    // ── NORMAL 模式 ───────────────────────────────────────────────────────────
-    Serial.println("[XC-RID] NORMAL mode");
-
-    FlightLog::init();
-
-#ifdef MOCK_DATA
+    // 2. 初始化 Mock 数据
     MockData::init(mock_rid_data);
-    Serial.println("[XC-RID] Mock data: Guangzhou Yuexiu District, 22.2734°N, 113.5439°E");
-#else
-    mavlink.init(
-        Parameters::get_uart_rx_pin(),
-        Parameters::get_uart_tx_pin(),
-        Parameters::get_baudrate()
-    );
-    Interlock::init();
-    Interlock::set_mavlink(&mavlink);
-#endif
+    ESP_LOGI(TAG, "Mock data initialized. Starting 1Hz WiFi broadcast loop...");
 
-    // BLE + WiFi 广播同时启动（GB 46750 §5.1.1）
-    // 初始化结果写入 MAVLinkInput，供联锁检查
-    const bool wifi_init_ok = wifi_tx.init();
-    // const bool ble_init_ok  = ble.init();
-    Serial.println("[XC-RID] Broadcast interfaces initialized:");
-    mavlink.set_wifi_ok(wifi_init_ok);
-    Serial.println("[XC-RID] WiFi init " + String(wifi_init_ok ? "OK" : "FAILED"));
-    // mavlink.set_ble_ok(ble_init_ok);
-    if (!wifi_init_ok) Serial.println("[XC-RID] WiFi init FAILED");
-    // if (!ble_init_ok)  Serial.println("[XC-RID] BLE init FAILED");
+    TickType_t last_broadcast_tick = xTaskGetTickCount();
+    const TickType_t broadcast_interval = 1000 / portTICK_PERIOD_MS; // 1Hz
 
-    Led::set(Led::State::WAIT_DATA);
+    while (1) {
+        // 更新模拟数据 (位置、速度等)
+        MockData::update(mock_rid_data);
+
+        // 定时广播 (1Hz)
+        if (xTaskGetTickCount() - last_broadcast_tick >= broadcast_interval) {
+            last_broadcast_tick = xTaskGetTickCount();
+            wifi_tx.transmit(mock_rid_data);
+        }
+        
+        // 让出 CPU，防止触发单核芯片的 Task Watchdog
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
 }
 
-void loop()
-{
-    if (boot_mode == BootMode::CONFIG) {
-        webserver.update();
-        Led::update();
-        return;
+// ==========================================
+// ESP-IDF 程序入口
+// ==========================================
+extern "C" void app_main(void) {
+    ESP_LOGI(TAG, "\n=== [XC-RID] System Boot (WiFi-Only Mode) ===");
+
+    // 1. 修复 NVS 和 MAC (针对 ESP32-S0WD 硬件瑕疵)
+    ESP_LOGI(TAG, "-> Initializing NVS...");
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
     }
+    ESP_ERROR_CHECK(err);
 
-    const uint32_t now_ms = millis();
+    set_custom_mac_address();
 
-#ifdef MOCK_DATA
-    MockData::update(mock_rid_data);
-    const RIDData &data = mock_rid_data;
-    Led::set(Led::State::OK);
-#else
-    mavlink.update();
-    const RIDData &data = mavlink.get_data();
-    Interlock::update(data);
-#endif
+    // 2. 加载参数 (内部会自动写入默认值并标记为已配置)
+    Parameters::init();
 
-    Led::update();
-
-    // 广播 1Hz（GB 46750 §5.1.3）
-    // 无论 location_valid 与否都广播：失效时编码器自动填 0xFF 位置未知，
-    // op_status 携带 RID_FAIL 状态，满足 §5.1.7b 飞行中失效告警要求
-    static uint32_t last_broadcast_ms = 0;
-    if (now_ms - last_broadcast_ms >= 1000) {
-        last_broadcast_ms = now_ms;
-        const bool wifi_ok = wifi_tx.transmit(data);
-        
-        // const bool ble_ok  = ble.transmit(data);
-#ifndef MOCK_DATA
-        // 将实际发送结果反馈给联锁，运行中发送失败会触发 PRE_ARM_FAIL
-        Interlock::notify_tx_result(ble_ok, wifi_ok);
-#endif
-    }
-
-    // 存储 10s（GB 46750 §5.1.8）
-    // 失效时段也入库，op_status 字段标识失效，保证事后查证完整性
-    static uint32_t last_storage_ms = 0;
-    if (now_ms - last_storage_ms >= 10000) {
-        last_storage_ms = now_ms;
-        FlightLog::write(data);
-    }
-
-    delay(1);
+    // 3. 启动 Wi-Fi 广播任务 (由于去掉了 BLE，8192 的栈空间现在极其充裕)
+    xTaskCreate(wifi_broadcast_task, "wifi_task", 8192, NULL, 5, NULL);
 }

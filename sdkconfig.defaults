@@ -1,0 +1,23 @@
+# ==========================================
+# 1. 单核支持
+# ==========================================
+CONFIG_FREERTOS_UNICORE=y
+CONFIG_FREERTOS_HZ=1000
+
+# ==========================================
+# 2. 禁用蓝牙 (释放资源)
+# ==========================================
+CONFIG_BT_ENABLED=n
+
+# ==========================================
+# 3. 【核心修复】强制忽略 eFuse MAC CRC 错误
+# 这将阻止 phy_init.c 中的 ESP_ERROR_CHECK 导致 abort()
+# ==========================================
+CONFIG_ESP32_IGNORE_MAC_CRC_ERROR=y
+CONFIG_ESP_MAC_IGNORE_MAC_CRC_ERROR=y
+
+# ==========================================
+# 4. 【双重保险】强制使用自定义 MAC 作为 Base MAC
+# ==========================================
+CONFIG_ESP_MAC_USE_CUSTOM_MAC_AS_BASE_MAC=y
+CONFIG_ESP_MAC_CUSTOM_MAC_ADDRESS="24:0a:c4:12:34:56"
