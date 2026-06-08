@@ -130,6 +130,11 @@ static void ble_host_task(void *param) {
 static void ble_on_sync(void) {
     ESP_LOGI(TAG, "Host and Controller synced. Configuring advertising data...");
     
+    // 【新增】降低 BLE 发射功率至 -6dBm，防止瞬间电流引发 Brownout 重启
+    // ESP_PWR_LVL_N6 代表 -6dBm。如果还重启，可以改为 ESP_PWR_LVL_N12 (-12dBm)
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_N6);
+    ESP_LOGI(TAG, "BLE TX Power set to -6dBm to prevent Brownout.");
+
     // 【关键修复】显式构建广播数据包 (Advertising Payload)
     struct ble_hs_adv_fields fields = {0};
     

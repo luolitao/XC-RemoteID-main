@@ -43,8 +43,6 @@ private:
 #define PARAM_CONFIGURED    "CONFIGURED"   // 首次配置完成标志
 
 // ... 原有宏定义 ...
-#define PARAM_OP_CATEGORY "op_cat"
-#define PARAM_UA_CLASS    "ua_cls"
 #define PARAM_GCS_LAT     "gcs_lat"
 #define PARAM_GCS_LON     "gcs_lon"
 #define PARAM_GCS_ALT     "gcs_alt"
