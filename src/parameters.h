@@ -21,6 +21,8 @@ public:
     static void set_uint8(const char *key, uint8_t val);
     static void set_uint32(const char *key, uint32_t val);
 
+    static void set_float(const char *key, float val);
+    static float get_float(const char *key, float default_val);
     // 常用参数快捷访问
 
     static uint32_t get_baudrate();
@@ -37,8 +39,13 @@ private:
 #define PARAM_REG_MARK      "REG_MARK"     // 实名登记标志后8位
 #define PARAM_OP_CATEGORY   "OP_CATEGORY"  // 运行类别 0~3
 #define PARAM_UA_CLASS      "UA_CLASS"     // 无人机分类 0~4
-#define PARAM_UART_RX       "UART_RX"      // UART RX 引脚
-#define PARAM_UART_TX       "UART_TX"      // UART TX 引脚
-#define PARAM_BAUDRATE      "BAUDRATE"     // 波特率
 #define PARAM_WIFI_CH       "WIFI_CH"      // Wi-Fi 信道（1~13）
 #define PARAM_CONFIGURED    "CONFIGURED"   // 首次配置完成标志
+
+// ... 原有宏定义 ...
+#define PARAM_OP_CATEGORY "op_cat"
+#define PARAM_UA_CLASS    "ua_cls"
+#define PARAM_GCS_LAT     "gcs_lat"
+#define PARAM_GCS_LON     "gcs_lon"
+#define PARAM_GCS_ALT     "gcs_alt"
+

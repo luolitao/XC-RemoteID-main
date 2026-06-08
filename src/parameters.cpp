@@ -29,26 +29,22 @@ static nvs_handle_t open_nvs(nvs_open_mode mode) {
     return handle;
 }
 
-// ==========================================
-// 初始化与状态检查
-// ==========================================
 void Parameters::init()
 {
-    // 1. 确保 NVS 分区已初始化 (双重保险，防止 app_main 中遗漏)
+    // 确保 NVS 分区已初始化
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition corrupted or version mismatch, erasing...");
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
 
-    // 2. 检查是否已配置，若未配置则加载默认值
+    // 【核心逻辑】检查设备是否已经通过蓝牙配网保存过数据
     if (!is_configured()) {
-        ESP_LOGI(TAG, "Device not configured, loading defaults...");
-        load_defaults();
+        ESP_LOGI(TAG, "Device not configured (Factory state), loading empty defaults...");
+        load_defaults(); // 修正：调用现有的 load_defaults()
     } else {
-        ESP_LOGI(TAG, "Configuration loaded from NVS successfully.");
+        ESP_LOGI(TAG, "Configuration loaded from NVS successfully. User data is safe.");
     }
 }
 
@@ -70,20 +66,43 @@ void Parameters::load_defaults()
     nvs_handle_t handle = open_nvs(NVS_READWRITE);
     if (!handle) return;
 
-    // 写入默认值 (注意：字符串需要以 \0 结尾，C++ 字面量自带)
     nvs_set_str(handle, PARAM_UAS_ID, "");
     nvs_set_str(handle, PARAM_REG_MARK, "");
     nvs_set_u8(handle, PARAM_OP_CATEGORY, 1);   // 开放类
     nvs_set_u8(handle, PARAM_UA_CLASS, 1);      // 轻型
-    nvs_set_u32(handle, PARAM_BAUDRATE, 115200);
-    nvs_set_u8(handle, PARAM_WIFI_CH, 6);
     
-    // 【关键】不写 PARAM_CONFIGURED，保持未配置状态
+    // 【新增】写入默认起飞点坐标 (广州越秀区)
+    float lat = 23.1429f, lon = 113.2602f, alt = 14.0f;
+    nvs_set_blob(handle, PARAM_GCS_LAT, &lat, sizeof(float));
+    nvs_set_blob(handle, PARAM_GCS_LON, &lon, sizeof(float));
+    nvs_set_blob(handle, PARAM_GCS_ALT, &alt, sizeof(float));
+
+     nvs_set_u8(handle, PARAM_WIFI_CH, 6);
     
-    nvs_commit(handle); // 必须 commit 才会写入 Flash
+    nvs_commit(handle);
     nvs_close(handle);
-    
     ESP_LOGI(TAG, "Default parameters loaded and committed.");
+}
+
+// 【新增】Float 读写实现
+void Parameters::set_float(const char *key, float val) {
+    nvs_handle_t handle = open_nvs(NVS_READWRITE);
+    if (!handle) return;
+    nvs_set_blob(handle, key, &val, sizeof(float));
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+float Parameters::get_float(const char *key, float default_val) {
+    float val = default_val;
+    nvs_handle_t handle = open_nvs(NVS_READONLY);
+    if (!handle) return val;
+    size_t len = sizeof(float);
+    if (nvs_get_blob(handle, key, &val, &len) != ESP_OK) {
+        val = default_val;
+    }
+    nvs_close(handle);
+    return val;
 }
 
 // ==========================================
@@ -129,19 +148,6 @@ uint32_t Parameters::get_uint32(const char *key)
     return val;
 }
 
-uint32_t Parameters::get_baudrate()
-{
-    uint32_t val = 115200; // 默认值
-    nvs_handle_t handle = open_nvs(NVS_READONLY);
-    if (!handle) return val;
-
-    esp_err_t err = nvs_get_u32(handle, PARAM_BAUDRATE, &val);
-    if (err != ESP_OK) {
-        val = 115200; // 如果读取失败或不存在，强制返回默认值
-    }
-    nvs_close(handle);
-    return val;
-}
 
 // ==========================================
 // 写入接口 (Setters)

@@ -3,3 +3,5 @@
 *.code-workspace
 .DS_Store
 
+# 自动生成的时间戳头文件
+src/version_auto.h

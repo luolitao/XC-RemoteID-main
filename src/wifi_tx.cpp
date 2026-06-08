@@ -127,7 +127,9 @@ bool WiFi_TX::transmit(const RIDData &data)
     ie->payload[0] = Counter;  
     memcpy(ie->payload + 1, gb_buf, gb_len);  
 
-    printVendorIE(ie);
+    if (Counter == 0x0) {
+        printVendorIE(ie);
+    }
 
     esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie);
     bool ok = (esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie) == ESP_OK);

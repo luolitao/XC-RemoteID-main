@@ -3,21 +3,41 @@
 # ==========================================
 CONFIG_FREERTOS_UNICORE=y
 CONFIG_FREERTOS_HZ=1000
-
-# ... (保留之前的单核、MAC修复、OTA等配置) ...
+# 修复 ESP-IDF 5.x 的 Flash 大小识别
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
 # ==========================================
 # 蓝牙配网核心配置 (NimBLE 极简模式)
 # ==========================================
 CONFIG_BT_ENABLED=y
-CONFIG_BT_BLUEDROID_ENABLED=n          # 【关键】禁用庞大的 Bluedroid
-CONFIG_BT_NIMBLE_ENABLED=y             # 【关键】启用轻量级 NimBLE
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=y
+
+# 【关键修复 2】强制控制器仅运行 BLE 模式，彻底禁用经典蓝牙 (BR/EDR)
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+
+# 极限压缩蓝牙内存占用
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_DEFAULT=y
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1     # 仅允许 1 个手机连接，省内存
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y     # 仅作为外设 (GATT Server)
+
+# 仅保留外设角色 (GATT Server)
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+# ==========================================
+# 极限压缩 NimBLE 内存 (关闭不需要的配对和持久化)
+# ==========================================
+CONFIG_BT_NIMBLE_NVS_PERSIST=n       # 关闭 NVS 持久化 (消除 IRKs 报错)
+CONFIG_BT_NIMBLE_SM_BONDING=0        # 禁用绑定
+CONFIG_BT_NIMBLE_SM_SC=0             # 禁用安全连接 (Secure Connections)
+CONFIG_BT_NIMBLE_SM_LEGACY=0         # 禁用传统配对
+
+# Wi-Fi 与 BLE 软件共存 (单核必备)
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
 # Wi-Fi 与 BLE 软件共存 (单核必备)
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
@@ -34,8 +54,6 @@ CONFIG_ESP_MAC_IGNORE_MAC_CRC_ERROR=y
 # ==========================================
 CONFIG_ESP_MAC_USE_CUSTOM_MAC_AS_BASE_MAC=y
 CONFIG_ESP_MAC_CUSTOM_MAC_ADDRESS="24:0a:c4:12:34:56"
-
-# ... (保留之前的单核、MAC 修复、禁用蓝牙等配置) ...
 
 # ==========================================
 # OTA 核心配置
