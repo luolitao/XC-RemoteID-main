@@ -1,14 +1,13 @@
 /*
-Wi-Fi 广播发送实现 (支持 RemoteID 广播 + OTA 连接)
+Wi-Fi 广播发送实现 (支持 RemoteID 广播 + 统一 Web 服务)
 【修复说明】
-1. 添加 #include <cmath> 修复 fmod 未声明
-2. RIDData 字段映射使用占位符 + 注释，按需替换为你的实际字段名
-3. 保留原有 GB46750 编码逻辑，RID 编码暂注释（避免编译错误）
+2. 补充 esp_timer.h 修复 esp_timer_get_time 未声明
+3. 补全 _http_ota_update 类内声明
+4. 修复不存在的 esp_wifi_ap_get_record API
 */
 #include "wifi_tx.h"
 #include "parameters.h"
 #include "encoder.h"
-// #include "rid_encoder.h"  // 如需启用 RID 编码，取消注释并确保 rid_encoder.h 已修复
 #include <esp_wifi.h>
 #include <esp_log.h>
 #include <esp_event.h>
@@ -16,69 +15,28 @@ Wi-Fi 广播发送实现 (支持 RemoteID 广播 + OTA 连接)
 #include <string.h>
 #include "esp_random.h"
 #include <lwip/ip4_addr.h>
-#include <cmath>  // ✅ 新增：修复 fmod 未声明
+#include <esp_http_server.h>
+#include <cJSON.h>
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+#include "esp_timer.h"  // ✅ 新增：修复 esp_timer_get_time 未声明
 
 static const char* TAG = "WIFI_TX";
 #define RID_OUI_0  0xFA
 #define RID_OUI_1  0x0B
 #define RID_OUI_2  0xBC
 #define RID_OUI_TYPE 0x0D
+#define HTTP_SERVER_PORT 80
+#define HTTP_MAX_REQ_LEN 4096
+#define WEB_AUTH_TOKEN "admin123"
 
 static uint8_t Counter = 0;
 static bool s_wifi_driver_inited = false;
+static RID_EncodeMode s_encode_mode = RID_EncodeMode::MODE_GB46750_ONLY;
+static uint32_t s_start_time_ms = 0;
 
-bool WiFi_TX::init()
-{
-    if (_initialised) return true;
-    _initialised = true;
-    ESP_LOGI(TAG, "Initializing Wi-Fi AP for Broadcast & OTA... ");
-
-    for (int i = 0; i < 6; i++) _mac[i] = (uint8_t)(esp_random() & 0xFF);
-    _mac[0] |= 0x02; _mac[0] &= 0xFE;
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
-
-    if (!s_wifi_driver_inited) {
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-        s_wifi_driver_inited = true;
-    }
-    esp_wifi_set_mac(WIFI_IF_AP, _mac);
-
-    char ap_ssid[32];
-    snprintf(ap_ssid, sizeof(ap_ssid), "XC-RID-%02X%02X%02X", _mac[3], _mac[4], _mac[5]);
-
-    wifi_config_t wifi_config = {};
-    strncpy((char*)wifi_config.ap.ssid, ap_ssid, sizeof(wifi_config.ap.ssid)-1);
-    wifi_config.ap.ssid_len = strlen(ap_ssid);
-    strncpy((char*)wifi_config.ap.password, "12345678", sizeof(wifi_config.ap.password)-1);
-    wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_config.ap.channel = Parameters::get_uint8(PARAM_WIFI_CH);
-    wifi_config.ap.max_connection = 4;
-    wifi_config.ap.ssid_hidden = 0;
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));  // ✅ 修复：删除空格
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
-
-    esp_netif_dhcps_stop(ap_netif);
-    esp_netif_ip_info_t ip_info;
-    IP4_ADDR(&ip_info.ip, 10, 0, 0, 1);
-    IP4_ADDR(&ip_info.gw, 10, 0, 0, 1);
-    IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
-    ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ip_info));
-    ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
-
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "Wi-Fi AP Started. SSID: %s, IP: 10.0.0.1", ap_ssid);
-
-    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
-    esp_wifi_set_max_tx_power(52);
-    return true;
-}
-
-void printVendorIE(const vendor_ie_data_t* ie) {
+// ✅ 修复：改为类作用域实现，去掉文件级 static
+void WiFi_TX::printVendorIE(const vendor_ie_data_t* ie) {
     if (!ie) return;
     ESP_LOGI(TAG, "IE: ID=0x%02X, Len=%d, OUI: %02X:%02X:%02X, Type=0x%02X",
              ie->element_id, ie->length,
@@ -88,72 +46,243 @@ void printVendorIE(const vendor_ie_data_t* ie) {
     ESP_LOG_BUFFER_HEX(TAG, ie->payload, payload_len > 16 ? 16 : payload_len);
 }
 
-bool WiFi_TX::transmit(const RIDData &data)
-{
+// JSON 辅助函数
+esp_err_t WiFi_TX::_send_json_response(httpd_req_t *req, const char* json) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, json, strlen(json));
+}
+
+esp_err_t WiFi_TX::_send_error_response(httpd_req_t *req, int code, const char* msg) {
+    httpd_resp_set_status(req, code == 401 ? "401 Unauthorized" : "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    char err_buf[128];
+    snprintf(err_buf, sizeof(err_buf), "{\"error\":%d,\"msg\":\"%s\"}", code, msg);
+    return httpd_resp_send(req, err_buf, strlen(err_buf));
+}
+
+// 🔹 路由处理器实现
+esp_err_t WiFi_TX::_http_get_device_info(httpd_req_t *req) {
+    const esp_app_desc_t* app_desc = esp_app_get_description();
+    uint8_t mac[6]; esp_wifi_get_mac(WIFI_IF_AP, mac);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "project", app_desc->project_name);
+    cJSON_AddStringToObject(root, "version", app_desc->version);
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    cJSON_AddStringToObject(root, "mac_ap", mac_str);
+    cJSON_AddStringToObject(root, "oui", "FA:0B:BC");
+    cJSON_AddNumberToObject(root, "oui_type", RID_OUI_TYPE);
+    const char* resp = cJSON_PrintUnformatted(root);
+    esp_err_t ret = _send_json_response(req, resp);
+    free((void*)resp); cJSON_Delete(root);
+    return ret;
+}
+
+esp_err_t WiFi_TX::_http_get_system_info(httpd_req_t *req) {
+    uint32_t uptime_ms = esp_timer_get_time() / 1000 - s_start_time_ms;
+    multi_heap_info_t heap_info;
+    heap_caps_get_info(&heap_info, MALLOC_CAP_8BIT);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "uptime_sec", uptime_ms / 1000);
+    cJSON_AddNumberToObject(root, "free_heap", heap_info.total_free_bytes);
+    cJSON_AddNumberToObject(root, "min_free_heap", heap_info.minimum_free_bytes);
+    cJSON_AddNumberToObject(root, "encode_mode", static_cast<int>(s_encode_mode));
+    const char* mode_str = (s_encode_mode == RID_EncodeMode::MODE_GB46750_ONLY) ? "GB46750" :
+                          (s_encode_mode == RID_EncodeMode::MODE_RID_ONLY) ? "RID" : "DUAL";
+    cJSON_AddStringToObject(root, "encode_mode_str", mode_str);
+    cJSON_AddBoolToObject(root, "ap_active", true); // ✅ 修复：替换不存在的 esp_wifi_ap_get_record
+    const char* resp = cJSON_PrintUnformatted(root);
+    esp_err_t ret = _send_json_response(req, resp);
+    free((void*)resp); cJSON_Delete(root);
+    return ret;
+}
+
+esp_err_t WiFi_TX::_http_get_status(httpd_req_t *req) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "counter", Counter);
+    cJSON_AddNumberToObject(root, "last_broadcast_ms", esp_timer_get_time() / 1000);
+    const char* resp = cJSON_PrintUnformatted(root);
+    esp_err_t ret = _send_json_response(req, resp);
+    free((void*)resp); cJSON_Delete(root);
+    return ret;
+}
+
+esp_err_t WiFi_TX::_http_post_config(httpd_req_t *req) {
+    char token_buf[64] = {0};
+    size_t token_len = httpd_req_get_hdr_value_len(req, "Authorization");
+    if (token_len > 0 && token_len < sizeof(token_buf)) {
+        httpd_req_get_hdr_value_str(req, "Authorization", token_buf, sizeof(token_buf));
+        if (strcmp(token_buf, "Bearer " WEB_AUTH_TOKEN) != 0) return _send_error_response(req, 401, "Invalid token");
+    } else { return _send_error_response(req, 401, "Missing Authorization"); }
+    
+    char recv_buf[512];
+    int ret = httpd_req_recv(req, recv_buf, sizeof(recv_buf) - 1);
+    if (ret <= 0) { if (ret == HTTPD_SOCK_ERR_TIMEOUT) httpd_resp_send_408(req); return ESP_FAIL; }
+    recv_buf[ret] = '\0';
+    cJSON* body = cJSON_Parse(recv_buf);
+    if (!body) return _send_error_response(req, 400, "Invalid JSON");
+    
+    esp_err_t result = ESP_OK;
+    cJSON* mode_item = cJSON_GetObjectItem(body, "encode_mode");
+    if (cJSON_IsNumber(mode_item)) {
+        RID_EncodeMode new_mode = static_cast<RID_EncodeMode>(mode_item->valueint);
+        if (new_mode <= RID_EncodeMode::MODE_DUAL) { s_encode_mode = new_mode; }
+        else { result = _send_error_response(req, 400, "Invalid encode_mode"); }
+    }
+    cJSON* resp_root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(resp_root, "status", result == ESP_OK ? 0 : -1);
+    cJSON_AddStringToObject(resp_root, "msg", result == ESP_OK ? "OK" : "Failed");
+    const char* resp = cJSON_PrintUnformatted(resp_root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, strlen(resp));
+    free((void*)resp); cJSON_Delete(body); cJSON_Delete(resp_root);
+    return result;
+}
+
+// 🔹 OTA 升级处理器 (补全实现)
+esp_err_t WiFi_TX::_http_ota_update(httpd_req_t *req) {
+    char token_buf[64] = {0};
+    size_t token_len = httpd_req_get_hdr_value_len(req, "Authorization");
+    if (token_len > 0 && token_len < sizeof(token_buf)) {
+        httpd_req_get_hdr_value_str(req, "Authorization", token_buf, sizeof(token_buf));
+        if (strcmp(token_buf, "Bearer " WEB_AUTH_TOKEN) != 0) return _send_error_response(req, 401, "Invalid token");
+    }
+    size_t content_len = httpd_req_get_hdr_value_len(req, "Content-Length");
+    if (content_len == 0) return _send_error_response(req, 400, "Missing Content-Length");
+
+    esp_ota_handle_t ota_handle;
+    const esp_partition_t* ota_partition = esp_ota_get_next_update_partition(nullptr);
+    if (!ota_partition) return _send_error_response(req, 500, "No OTA partition");
+    if (esp_ota_begin(ota_partition, OTA_SIZE_UNKNOWN, &ota_handle) != ESP_OK) return _send_error_response(req, 500, "OTA init failed");
+
+    char* buf = (char*)malloc(HTTP_MAX_REQ_LEN);
+    if (!buf) { esp_ota_abort(ota_handle); return _send_error_response(req, 500, "No memory"); }
+    size_t received = 0;
+    int read_len;
+    while ((read_len = httpd_req_recv(req, buf, HTTP_MAX_REQ_LEN)) > 0) {
+        if (esp_ota_write(ota_handle, buf, read_len) != ESP_OK) { esp_ota_abort(ota_handle); free(buf); return _send_error_response(req, 500, "Write failed"); }
+        received += read_len;
+    }
+    free(buf);
+
+    if (esp_ota_end(ota_handle) != ESP_OK) return _send_error_response(req, 400, "Invalid firmware");
+    if (esp_ota_set_boot_partition(ota_partition) != ESP_OK) return _send_error_response(req, 500, "Set boot failed");
+
+    cJSON* resp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(resp, "status", 0); cJSON_AddStringToObject(resp, "msg", "OK. Rebooting in 3s...");
+    const char* resp_str = cJSON_PrintUnformatted(resp);
+    httpd_resp_set_type(req, "application/json"); httpd_resp_send(req, resp_str, strlen(resp_str));
+    free((void*)resp_str); cJSON_Delete(resp);
+    vTaskDelay(pdMS_TO_TICKS(3000)); esp_restart();
+    return ESP_OK;
+}
+
+// 🔹 注册/启动/停止 Server
+bool WiFi_TX::registerOtaHandler(httpd_handle_t server) {
+    if (!server) return false;
+    httpd_uri_t uri = {"/ota", HTTP_POST, _http_ota_update, nullptr};
+    return httpd_register_uri_handler(server, &uri) == ESP_OK;
+}
+
+bool WiFi_TX::startWebServer() {
+    if (_http_server) return true;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = HTTP_SERVER_PORT; config.max_uri_handlers = 10;
+    config.recv_wait_timeout = 10; config.send_wait_timeout = 10; config.lru_purge_enable = true;
+    if (httpd_start(&_http_server, &config) != ESP_OK) { ESP_LOGE(TAG, "HTTP start failed"); return false; }
+
+    const httpd_uri_t uri_root = {"/", HTTP_GET, [](httpd_req_t *req) {
+        const char* html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>XC-RID</title></head><body><h1>XC-RID Device</h1><ul><li><a href='/api/device'>Device</a></li><li><a href='/api/system'>System</a></li><li><a href='/api/status'>Status</a></li></ul><p>OTA: POST to /ota with Bearer admin123</p></body></html>";
+        httpd_resp_set_type(req, "text/html"); return httpd_resp_send(req, html, strlen(html));
+    }, nullptr};
+    const httpd_uri_t uri_dev = {"/api/device", HTTP_GET, _http_get_device_info, nullptr};
+    const httpd_uri_t uri_sys = {"/api/system", HTTP_GET, _http_get_system_info, nullptr};
+    const httpd_uri_t uri_sta = {"/api/status", HTTP_GET, _http_get_status, nullptr};
+    const httpd_uri_t uri_cfg = {"/api/config", HTTP_POST, _http_post_config, nullptr};
+    const httpd_uri_t uri_ota = {"/ota", HTTP_POST, _http_ota_update, nullptr};
+
+    httpd_register_uri_handler(_http_server, &uri_root);
+    httpd_register_uri_handler(_http_server, &uri_dev);
+    httpd_register_uri_handler(_http_server, &uri_sys);
+    httpd_register_uri_handler(_http_server, &uri_sta);
+    httpd_register_uri_handler(_http_server, &uri_cfg);
+    httpd_register_uri_handler(_http_server, &uri_ota);
+    ESP_LOGI(TAG, "HTTP Server started on port %d", HTTP_SERVER_PORT);
+    return true;
+}
+
+void WiFi_TX::stopWebServer() { if (_http_server) { httpd_stop(_http_server); _http_server = nullptr; } }
+bool WiFi_TX::isWebServerRunning() const { return _http_server != nullptr; }
+
+// 🔹 init 与 transmit
+bool WiFi_TX::init() {
+    if (_initialised) return true;
+    _initialised = true;
+    s_start_time_ms = esp_timer_get_time() / 1000; // ✅ 已包含 esp_timer.h
+    ESP_LOGI(TAG, "Initializing Wi-Fi AP...");
+    for (int i = 0; i < 6; i++) _mac[i] = (uint8_t)(esp_random() & 0xFF);
+    _mac[0] |= 0x02; _mac[0] &= 0xFE;
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
+    if (!s_wifi_driver_inited) {
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ESP_ERROR_CHECK(esp_wifi_init(&cfg)); s_wifi_driver_inited = true;
+    }
+    esp_wifi_set_mac(WIFI_IF_AP, _mac);
+    char ap_ssid[32];
+    snprintf(ap_ssid, sizeof(ap_ssid), "XC-RID-%02X%02X%02X", _mac[3], _mac[4], _mac[5]);
+    wifi_config_t wifi_config = {};
+    strncpy((char*)wifi_config.ap.ssid, ap_ssid, sizeof(wifi_config.ap.ssid)-1);
+    wifi_config.ap.ssid_len = strlen(ap_ssid);
+    strncpy((char*)wifi_config.ap.password, "12345678", sizeof(wifi_config.ap.password)-1);
+    wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.ap.channel = Parameters::get_uint8(PARAM_WIFI_CH);
+    wifi_config.ap.max_connection = 4; wifi_config.ap.ssid_hidden = 0;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    esp_netif_dhcps_stop(ap_netif);
+    esp_netif_ip_info_t ip_info;
+    IP4_ADDR(&ip_info.ip, 10, 0, 0, 1); IP4_ADDR(&ip_info.gw, 10, 0, 0, 1); IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ip_info));
+    ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_LOGI(TAG, "Wi-Fi AP Started. SSID: %s, IP: 10.0.0.1", ap_ssid);
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    esp_wifi_set_max_tx_power(52);
+    startWebServer(); // 自动启动统一服务
+    return true;
+}
+
+bool WiFi_TX::transmit(const RIDData &data) {
     init();
     Counter = (Counter + 1) & 0xFF;
-
-    // ===== 当前仅启用 GB46750 编码 =====
     uint8_t gb_buf[GB_MAX_PACKET_LEN];
     int gb_len = GB46750Encoder::encode(data, gb_buf, sizeof(gb_buf));
-    if (gb_len <= 0) {
-        ESP_LOGE(TAG, "GB46750Encoder failed");
-        return false;
-    }
-
+    if (gb_len <= 0) { ESP_LOGE(TAG, "Encoder failed"); return false; }
     const size_t payload_len = 1 + gb_len;
     const size_t ie_size = sizeof(vendor_ie_data_t) + payload_len;
     vendor_ie_data_t *ie = static_cast<vendor_ie_data_t*>(malloc(ie_size));
     if (!ie) return false;
-
-    ie->element_id      = WIFI_VENDOR_IE_ELEMENT_ID;
-    ie->vendor_oui[0]   = RID_OUI_0;
-    ie->vendor_oui[1]   = RID_OUI_1;
-    ie->vendor_oui[2]   = RID_OUI_2;
+    ie->element_id = WIFI_VENDOR_IE_ELEMENT_ID;
+    ie->vendor_oui[0] = RID_OUI_0; ie->vendor_oui[1] = RID_OUI_1; ie->vendor_oui[2] = RID_OUI_2;
     ie->vendor_oui_type = RID_OUI_TYPE;
-    ie->length          = static_cast<uint8_t>(4 + payload_len);
-
+    ie->length = static_cast<uint8_t>(4 + payload_len);
     ie->payload[0] = Counter;
     memcpy(ie->payload + 1, gb_buf, gb_len);
-
-    if (Counter == 0x00) printVendorIE(ie);
-
+    // if (Counter == 0x00) printVendorIE(ie);
     esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie);
     bool ok = (esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie) == ESP_OK);
     if (ok) {
         esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, ie);
         ok = (esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, ie) == ESP_OK);
     }
-
     free(ie);
     return ok;
-
-    // ===== RID 编码模板（按需启用）=====
-    /*
-    // ⚠️ 请将下方 data.xxx 替换为你 encoder.h 中 RIDData 的实际成员名
-    auto to_rid_loc = [&]() -> RIDLocation {
-        RIDLocation loc = {};
-        loc.status = (data.飞行状态字段 == 1) ? RID_STATUS_AIRBORNE : RID_STATUS_GROUND;
-        loc.direction = data.航向字段;
-        loc.speed_h = data.水平速度字段;
-        loc.speed_v = data.垂直速度字段;
-        loc.latitude = data.纬度字段;
-        loc.longitude = data.经度字段;
-        loc.altitude_baro = data.气压高度字段;
-        loc.altitude_geo = data.GPS高度字段;
-        loc.height = data.离地高度字段;
-        loc.height_is_above_ground = true;
-        loc.acc_horiz = RID_ACC_3M; loc.acc_vert = RID_ACC_1M; loc.acc_ts = RID_ACC_1M;
-        loc.timestamp_sec = fmod(data.时间戳字段 / 1000.0f, 3600.0f);
-        return loc;
-    };
-    auto to_rid_basic = [&]() -> RIDBasicID {
-        RIDBasicID b = {}; b.ua_type = RID_UA_HELICOPTER; b.id_type = RID_ID_SERIAL_NO;
-        memset(b.uas_id, 0, 20);
-        strncpy(b.uas_id, data.序列号字段, 20);
-        return b;
-    };
-
-    // 使用 RID_Encoder::encodePayload(...) 编码...
-    */
 }
+
+void WiFi_TX::setEncodeMode(RID_EncodeMode mode) { s_encode_mode = mode; }
+RID_EncodeMode WiFi_TX::getEncodeMode() const { return s_encode_mode; }
