@@ -17,6 +17,9 @@ static double s_lon_per_m = 1.0 / 111320.0;
 
 float    MockData::_angle_deg = 0.0f;
 uint32_t MockData::_last_ms   = 0;
+float MockData::_speed_ms = 5.0f;
+float MockData::_radius_m = 50.0f;
+
 
 // ==========================================
 // 【关键修复】完美替代 Arduino millis()
@@ -26,6 +29,8 @@ static inline uint32_t get_millis() {
     // 转换为 uint32_t 后，行为与 Arduino millis() 完全一致（约 49.7 天后溢出回绕）
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
+
+
 
 void MockData::init(RIDData &data)
 {
@@ -60,6 +65,9 @@ void MockData::init(RIDData &data)
     data.ts_acc    = GBTsAcc::LTE_100MS;
 
     data.location_valid = true;
+    // ... 原有初始化逻辑 ...
+    _speed_ms = Parameters::get_float(PARAM_FLIGHT_SPEED, 5.0f);
+    _radius_m = Parameters::get_float(PARAM_ORBIT_RADIUS, 50.0f);
  
    // 【使用修复后的时间函数】
     _last_ms = get_millis(); 
@@ -77,16 +85,18 @@ void MockData::update(RIDData &data)
     const float dt = (now_ms - _last_ms) * 0.001f;
     _last_ms = now_ms;
 
-   // 绕圆：角速度 = speed / radius (rad/s)
-    const float omega_deg = (SPEED_MS / RADIUS_M) * (180.0f / M_PI);
+    // 绕圆：角速度 = speed / radius (rad/s)
+    // 将硬编码的 SPEED_MS 和 RADIUS_M 替换为 _speed_ms 和 _radius_m
+    const float omega_deg = (_speed_ms / _radius_m) * (180.0f / M_PI);
+    // ...
     _angle_deg += omega_deg * dt;
     if (_angle_deg >= 360.0f) _angle_deg -= 360.0f;
 
     const float rad = _angle_deg * M_PI / 180.0f;
 
     // 使用动态读取的起飞点坐标作为圆心
-    data.lat = data.gcs_lat + RADIUS_M * cos(rad) * s_lat_per_m;
-    data.lon = data.gcs_lon + RADIUS_M * sin(rad) * s_lon_per_m;
+    data.lat = data.gcs_lat + _radius_m * cos(rad) * s_lat_per_m;
+    data.lon = data.gcs_lon + _radius_m * sin(rad) * s_lon_per_m;
     
     data.geo_alt_m  = data.gcs_alt + FLIGHT_ALT; 
     data.baro_alt_m = data.geo_alt_m - 2.0f;   
@@ -106,4 +116,17 @@ void MockData::update(RIDData &data)
     // 注意：ESP32 没有 RTC 电池，重启后系统时间是 1970 年。
     // 这里用固定基准时间 + 启动后的运行毫秒数来模拟一个“看起来合理”的递增时间戳。
     data.timestamp_ms = 1704067200000ULL + now_ms;
+}
+
+// 【新增】热更新：重新读取 NVS 并刷新内存状态
+void MockData::reload(RIDData &data) {
+    data.gcs_lat = Parameters::get_float(PARAM_GCS_LAT, data.gcs_lat);
+    data.gcs_lon = Parameters::get_float(PARAM_GCS_LON, data.gcs_lon);
+    data.gcs_alt = Parameters::get_float(PARAM_GCS_ALT, data.gcs_alt);
+    _speed_ms = Parameters::get_float(PARAM_FLIGHT_SPEED, _speed_ms);
+    _radius_m = Parameters::get_float(PARAM_ORBIT_RADIUS, _radius_m);
+    
+    // 重新计算经度补偿系数
+    s_lon_per_m = 1.0 / (111320.0 * cos(data.gcs_lat * M_PI / 180.0));
+    ESP_LOGI(TAG, "Hot-reload applied: Lat=%f, Speed=%f, Radius=%f", data.gcs_lat, _speed_ms, _radius_m);
 }

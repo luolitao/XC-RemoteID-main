@@ -46,4 +46,5 @@ private:
 #define PARAM_GCS_LAT     "gcs_lat"
 #define PARAM_GCS_LON     "gcs_lon"
 #define PARAM_GCS_ALT     "gcs_alt"
-
+#define PARAM_FLIGHT_SPEED "flt_spd"
+#define PARAM_ORBIT_RADIUS "orb_rad"

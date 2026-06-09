@@ -36,6 +36,7 @@ private:
     static esp_err_t _http_get_device_info(httpd_req_t *req);
     static esp_err_t _http_get_system_info(httpd_req_t *req);
     static esp_err_t _http_get_status(httpd_req_t *req);
+    static esp_err_t _http_get_config(httpd_req_t *req);
     static esp_err_t _http_post_config(httpd_req_t *req);
     static esp_err_t _http_ota_update(httpd_req_t *req);  // ✅ 补全缺失声明
 };

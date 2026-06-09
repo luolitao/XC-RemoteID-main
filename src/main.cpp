@@ -18,10 +18,12 @@ Main entry point (BLE Config + WiFi Broadcast + Unified Web Server + OTA)
 #include "wifi_tx.h"
 #include "mock_data.h"
 #include "version.h"
+// 【新增】调试开关：设为 1 跳过蓝牙配网，直接进 Wi-Fi 模式
+#define SKIP_BLE_CONFIG 1 
 
 static const char* TAG = "MAIN";
 static WiFi_TX wifi_tx;
-static RIDData mock_rid_data{};
+RIDData mock_rid_data{}; // 确保没有 static 关键字，使其成为全局可见
 
 // 阶段 1: 配网模式
 static void run_config_mode() {
@@ -89,6 +91,12 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(err);
     Parameters::init();
 
-    run_config_mode();
-    run_normal_mode();
+    // 【修改】状态机流转
+#if SKIP_BLE_CONFIG
+    ESP_LOGW(TAG, ">>> SKIP_BLE_CONFIG is ON. Bypassing BLE mode! <<<");
+#else
+    run_config_mode();  // 正常流程：开机先进入 2 分钟 BLE 配网
+#endif
+
+    run_normal_mode(); // 进入 Wi-Fi 广播 + OTA + Web API 监听
 }

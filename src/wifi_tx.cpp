@@ -20,8 +20,8 @@ Wi-Fi 广播发送实现 (支持 RemoteID 广播 + 统一 Web 服务)
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"  // ✅ 新增：修复 esp_timer_get_time 未声明
+#include "mock_data.h"
 
-static const char* TAG = "WIFI_TX";
 #define RID_OUI_0  0xFA
 #define RID_OUI_1  0x0B
 #define RID_OUI_2  0xBC
@@ -29,6 +29,9 @@ static const char* TAG = "WIFI_TX";
 #define HTTP_SERVER_PORT 80
 #define HTTP_MAX_REQ_LEN 4096
 #define WEB_AUTH_TOKEN "admin123"
+
+extern RIDData mock_rid_data; // 引用 main.cpp 中的全局变量
+static const char* TAG = "WIFI_TX";
 
 static uint8_t Counter = 0;
 static bool s_wifi_driver_inited = false;
@@ -108,37 +111,68 @@ esp_err_t WiFi_TX::_http_get_status(httpd_req_t *req) {
     return ret;
 }
 
+// 【新增】GET /api/config 处理器
+esp_err_t WiFi_TX::_http_get_config(httpd_req_t *req) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "encode_mode", static_cast<int>(s_encode_mode));
+    cJSON_AddStringToObject(root, "uas_id", Parameters::get_str(PARAM_UAS_ID));
+    cJSON_AddStringToObject(root, "reg_mark", Parameters::get_str(PARAM_REG_MARK));
+    cJSON_AddNumberToObject(root, "op_category", Parameters::get_uint8(PARAM_OP_CATEGORY));
+    cJSON_AddNumberToObject(root, "ua_class", Parameters::get_uint8(PARAM_UA_CLASS));
+    cJSON_AddNumberToObject(root, "wifi_channel", Parameters::get_uint8(PARAM_WIFI_CH));
+    
+    const char* resp = cJSON_PrintUnformatted(root);
+    esp_err_t ret = _send_json_response(req, resp);
+    free((void*)resp); 
+    cJSON_Delete(root);
+    return ret;
+}
+
+// 【增强】POST /api/config 处理器 (支持多参数热更新)
 esp_err_t WiFi_TX::_http_post_config(httpd_req_t *req) {
+    // 1. Token 认证
     char token_buf[64] = {0};
     size_t token_len = httpd_req_get_hdr_value_len(req, "Authorization");
     if (token_len > 0 && token_len < sizeof(token_buf)) {
         httpd_req_get_hdr_value_str(req, "Authorization", token_buf, sizeof(token_buf));
         if (strcmp(token_buf, "Bearer " WEB_AUTH_TOKEN) != 0) return _send_error_response(req, 401, "Invalid token");
     } else { return _send_error_response(req, 401, "Missing Authorization"); }
-    
+
+    // 2. 接收 JSON
     char recv_buf[512];
     int ret = httpd_req_recv(req, recv_buf, sizeof(recv_buf) - 1);
     if (ret <= 0) { if (ret == HTTPD_SOCK_ERR_TIMEOUT) httpd_resp_send_408(req); return ESP_FAIL; }
     recv_buf[ret] = '\0';
+
     cJSON* body = cJSON_Parse(recv_buf);
     if (!body) return _send_error_response(req, 400, "Invalid JSON");
-    
-    esp_err_t result = ESP_OK;
-    cJSON* mode_item = cJSON_GetObjectItem(body, "encode_mode");
-    if (cJSON_IsNumber(mode_item)) {
-        RID_EncodeMode new_mode = static_cast<RID_EncodeMode>(mode_item->valueint);
-        if (new_mode <= RID_EncodeMode::MODE_DUAL) { s_encode_mode = new_mode; }
-        else { result = _send_error_response(req, 400, "Invalid encode_mode"); }
+
+    // 3. 解析并应用配置
+    cJSON* item;
+    if ((item = cJSON_GetObjectItem(body, "encode_mode")) && cJSON_IsNumber(item)) {
+        int new_mode = item->valueint;
+        if (new_mode >= 0 && new_mode <= 2) {
+            s_encode_mode = static_cast<RID_EncodeMode>(new_mode);
+            ESP_LOGI(TAG, "Encode mode changed to: %d", new_mode);
+        }
     }
-    cJSON* resp_root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(resp_root, "status", result == ESP_OK ? 0 : -1);
-    cJSON_AddStringToObject(resp_root, "msg", result == ESP_OK ? "OK" : "Failed");
-    const char* resp = cJSON_PrintUnformatted(resp_root);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, resp, strlen(resp));
-    free((void*)resp); cJSON_Delete(body); cJSON_Delete(resp_root);
-    return result;
+    if ((item = cJSON_GetObjectItem(body, "uas_id")) && cJSON_IsString(item)) {
+        Parameters::set_str(PARAM_UAS_ID, item->valuestring);
+    }
+    if ((item = cJSON_GetObjectItem(body, "reg_mark")) && cJSON_IsString(item)) {
+        Parameters::set_str(PARAM_REG_MARK, item->valuestring);
+    }
+    if ((item = cJSON_GetObjectItem(body, "op_category")) && cJSON_IsNumber(item)) {
+        Parameters::set_uint8(PARAM_OP_CATEGORY, item->valueint);
+    }
+    if ((item = cJSON_GetObjectItem(body, "ua_class")) && cJSON_IsNumber(item)) {
+        Parameters::set_uint8(PARAM_UA_CLASS, item->valueint);
+    }
+
+    cJSON_Delete(body);
+    return _send_json_response(req, "{\"status\":0,\"msg\":\"Config applied\"}");
 }
+
 
 // 🔹 OTA 升级处理器 (补全实现)
 esp_err_t WiFi_TX::_http_ota_update(httpd_req_t *req) {
@@ -185,29 +219,56 @@ bool WiFi_TX::registerOtaHandler(httpd_handle_t server) {
     return httpd_register_uri_handler(server, &uri) == ESP_OK;
 }
 
+// 【修改】startWebServer (更新 HTML 页面并注册 GET /api/config)
 bool WiFi_TX::startWebServer() {
     if (_http_server) return true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = HTTP_SERVER_PORT; config.max_uri_handlers = 10;
-    config.recv_wait_timeout = 10; config.send_wait_timeout = 10; config.lru_purge_enable = true;
-    if (httpd_start(&_http_server, &config) != ESP_OK) { ESP_LOGE(TAG, "HTTP start failed"); return false; }
+    config.server_port = HTTP_SERVER_PORT; 
+    config.max_uri_handlers = 10;
+    config.recv_wait_timeout = 10; 
+    config.send_wait_timeout = 10; 
+    config.lru_purge_enable = true;
 
-    const httpd_uri_t uri_root = {"/", HTTP_GET, [](httpd_req_t *req) {
-        const char* html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>XC-RID</title></head><body><h1>XC-RID Device</h1><ul><li><a href='/api/device'>Device</a></li><li><a href='/api/system'>System</a></li><li><a href='/api/status'>Status</a></li></ul><p>OTA: POST to /ota with Bearer admin123</p></body></html>";
-        httpd_resp_set_type(req, "text/html"); return httpd_resp_send(req, html, strlen(html));
+    if (httpd_start(&_http_server, &config) != ESP_OK) { 
+        ESP_LOGE(TAG, "HTTP start failed"); return false; 
+    }
+
+    // ✅ 更新 HTML 导航页
+    const httpd_uri_t uri_root = { "/", HTTP_GET, [](httpd_req_t *req) {
+        const char* html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>XC-RID</title></head><body>"
+                           "<h1>XC-RID Device</h1>"
+                           "<h3>GET APIs (No Auth)</h3>"
+                           "<ul>"
+                           "<li><a href='/api/device'>/api/device</a> (Device Info)</li>"
+                           "<li><a href='/api/system'>/api/system</a> (System Info)</li>"
+                           "<li><a href='/api/status'>/api/status</a> (Broadcast Status)</li>"
+                           "<li><a href='/api/config'>/api/config</a> (Current Config)</li>"
+                           "</ul>"
+                           "<h3>POST APIs (Auth: Bearer admin123)</h3>"
+                           "<ul>"
+                           "<li>POST /api/config (JSON body, e.g. {\"encode_mode\": 1})</li>"
+                           "<li>POST /ota (Binary firmware)</li>"
+                           "</ul>"
+                           "</body></html>";
+        httpd_resp_set_type(req, "text/html"); 
+        return httpd_resp_send(req, html, strlen(html));
     }, nullptr};
-    const httpd_uri_t uri_dev = {"/api/device", HTTP_GET, _http_get_device_info, nullptr};
-    const httpd_uri_t uri_sys = {"/api/system", HTTP_GET, _http_get_system_info, nullptr};
-    const httpd_uri_t uri_sta = {"/api/status", HTTP_GET, _http_get_status, nullptr};
-    const httpd_uri_t uri_cfg = {"/api/config", HTTP_POST, _http_post_config, nullptr};
-    const httpd_uri_t uri_ota = {"/ota", HTTP_POST, _http_ota_update, nullptr};
+
+    const httpd_uri_t uri_dev = { "/api/device", HTTP_GET, _http_get_device_info, nullptr};
+    const httpd_uri_t uri_sys = { "/api/system", HTTP_GET, _http_get_system_info, nullptr};
+    const httpd_uri_t uri_sta = { "/api/status", HTTP_GET, _http_get_status, nullptr};
+    const httpd_uri_t uri_cfg_get = { "/api/config", HTTP_GET, _http_get_config, nullptr}; // ✅ 新增 GET
+    const httpd_uri_t uri_cfg_post = { "/api/config", HTTP_POST, _http_post_config, nullptr};
+    const httpd_uri_t uri_ota = { "/ota", HTTP_POST, _http_ota_update, nullptr};
 
     httpd_register_uri_handler(_http_server, &uri_root);
     httpd_register_uri_handler(_http_server, &uri_dev);
     httpd_register_uri_handler(_http_server, &uri_sys);
     httpd_register_uri_handler(_http_server, &uri_sta);
-    httpd_register_uri_handler(_http_server, &uri_cfg);
+    httpd_register_uri_handler(_http_server, &uri_cfg_get);
+    httpd_register_uri_handler(_http_server, &uri_cfg_post);
     httpd_register_uri_handler(_http_server, &uri_ota);
+
     ESP_LOGI(TAG, "HTTP Server started on port %d", HTTP_SERVER_PORT);
     return true;
 }
@@ -260,26 +321,54 @@ bool WiFi_TX::init() {
 bool WiFi_TX::transmit(const RIDData &data) {
     init();
     Counter = (Counter + 1) & 0xFF;
-    uint8_t gb_buf[GB_MAX_PACKET_LEN];
-    int gb_len = GB46750Encoder::encode(data, gb_buf, sizeof(gb_buf));
-    if (gb_len <= 0) { ESP_LOGE(TAG, "Encoder failed"); return false; }
-    const size_t payload_len = 1 + gb_len;
-    const size_t ie_size = sizeof(vendor_ie_data_t) + payload_len;
-    vendor_ie_data_t *ie = static_cast<vendor_ie_data_t*>(malloc(ie_size));
+    
+    uint8_t payload_buf[GB_MAX_PACKET_LEN];
+    int payload_len = 0;
+    
+    // ✅ 【核心修复】根据 s_encode_mode 动态选择编码方式
+    if (s_encode_mode == RID_EncodeMode::MODE_GB46750_ONLY || s_encode_mode == RID_EncodeMode::MODE_DUAL) {
+        payload_len = GB46750Encoder::encode(data, payload_buf, sizeof(payload_buf));
+    } 
+    else if (s_encode_mode == RID_EncodeMode::MODE_RID_ONLY) {
+        // TODO: 未来在这里调用 ASTMEncoder::encode(data, payload_buf, sizeof(payload_buf));
+        // 目前由于 ASTM 编码器尚未实现，我们暂时用 GB 编码器占位，但修改 OUI Type 以示区别
+        ESP_LOGW(TAG, "ASTM RID_ONLY mode selected. (Fallback to GB46750 payload for now)");
+        payload_len = GB46750Encoder::encode(data, payload_buf, sizeof(payload_buf));
+    }
+
+    if (payload_len <= 0) { 
+        ESP_LOGE(TAG, "Encoder failed"); 
+        return false; 
+    }
+
+    const size_t ie_payload_len = 1 + payload_len;
+    const size_t ie_size = sizeof(vendor_ie_data_t) + ie_payload_len;
+    vendor_ie_data_t *ie = static_cast<vendor_ie_data_t *>(malloc(ie_size));
     if (!ie) return false;
+
     ie->element_id = WIFI_VENDOR_IE_ELEMENT_ID;
-    ie->vendor_oui[0] = RID_OUI_0; ie->vendor_oui[1] = RID_OUI_1; ie->vendor_oui[2] = RID_OUI_2;
-    ie->vendor_oui_type = RID_OUI_TYPE;
-    ie->length = static_cast<uint8_t>(4 + payload_len);
+    ie->vendor_oui[0] = RID_OUI_0; 
+    ie->vendor_oui[1] = RID_OUI_1; 
+    ie->vendor_oui[2] = RID_OUI_2;
+    
+    // 如果是 ASTM 模式，Type 通常不同 (例如 0x0D 是 ASTM Message Pack)
+    ie->vendor_oui_type = (s_encode_mode == RID_EncodeMode::MODE_RID_ONLY) ? 0x01 : RID_OUI_TYPE; 
+    ie->length = static_cast<uint8_t>(4 + ie_payload_len);
+    
     ie->payload[0] = Counter;
-    memcpy(ie->payload + 1, gb_buf, gb_len);
-    // if (Counter == 0x00) printVendorIE(ie);
+    memcpy(ie->payload + 1, payload_buf, payload_len);
+
+    // 打印日志，方便观察模式切换是否生效
+    if (Counter == 0x01) printVendorIE(ie);
+
     esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie);
     bool ok = (esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie) == ESP_OK);
+    
     if (ok) {
         esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, ie);
         ok = (esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, ie) == ESP_OK);
     }
+
     free(ie);
     return ok;
 }

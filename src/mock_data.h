@@ -20,7 +20,11 @@ public:
     // 每次 loop() 调用，更新位置/速度/时间戳
     static void update(RIDData &data);
 
+    static void reload(RIDData &data); // 【新增】热更新参数
 private:
+    static float _speed_ms;
+    static float _radius_m;
+    // ... 其他原有变量
     static float  _angle_deg;   // 当前绕圆角度
     static uint32_t _last_ms;
 };

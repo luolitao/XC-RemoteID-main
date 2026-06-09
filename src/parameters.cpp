@@ -76,8 +76,12 @@ void Parameters::load_defaults()
     nvs_set_blob(handle, PARAM_GCS_LAT, &lat, sizeof(float));
     nvs_set_blob(handle, PARAM_GCS_LON, &lon, sizeof(float));
     nvs_set_blob(handle, PARAM_GCS_ALT, &alt, sizeof(float));
+    float speed = 5.0f, radius = 50.0f;
+    nvs_set_blob(handle, PARAM_FLIGHT_SPEED, &speed, sizeof(float));
+    nvs_set_blob(handle, PARAM_ORBIT_RADIUS, &radius, sizeof(float));    
 
-     nvs_set_u8(handle, PARAM_WIFI_CH, 6);
+    nvs_set_u8(handle, PARAM_WIFI_CH, 6);
+
     
     nvs_commit(handle);
     nvs_close(handle);
