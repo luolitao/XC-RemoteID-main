@@ -6,8 +6,8 @@
 
 enum class RID_EncodeMode : uint8_t {
     MODE_GB46750_ONLY = 0,
-    MODE_RID_ONLY     = 1,
-    MODE_DUAL         = 2
+    MODE_RID_ONLY     = 1
+    // 移除 MODE_DUAL = 2
 };
 
 class WiFi_TX {

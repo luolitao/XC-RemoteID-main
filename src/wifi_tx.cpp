@@ -5,9 +5,6 @@ Wi-Fi 广播发送实现 (支持 RemoteID 广播 + 统一 Web 服务)
 3. 补全 _http_ota_update 类内声明
 4. 修复不存在的 esp_wifi_ap_get_record API
 */
-#include "wifi_tx.h"
-#include "parameters.h"
-#include "encoder.h"
 #include <esp_wifi.h>
 #include <esp_log.h>
 #include <esp_event.h>
@@ -20,6 +17,11 @@ Wi-Fi 广播发送实现 (支持 RemoteID 广播 + 统一 Web 服务)
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"  // ✅ 新增：修复 esp_timer_get_time 未声明
+
+#include "wifi_tx.h"
+#include "parameters.h"
+#include "encoder.h"
+#include "rid_encoder.h"
 #include "mock_data.h"
 
 #define RID_OUI_0  0xFA
@@ -151,7 +153,7 @@ esp_err_t WiFi_TX::_http_post_config(httpd_req_t *req) {
     cJSON* item;
     if ((item = cJSON_GetObjectItem(body, "encode_mode")) && cJSON_IsNumber(item)) {
         int new_mode = item->valueint;
-        if (new_mode >= 0 && new_mode <= 2) {
+        if (new_mode >= 0 && new_mode <= 1) {
             s_encode_mode = static_cast<RID_EncodeMode>(new_mode);
             ESP_LOGI(TAG, "Encode mode changed to: %d", new_mode);
         }
@@ -322,18 +324,74 @@ bool WiFi_TX::transmit(const RIDData &data) {
     init();
     Counter = (Counter + 1) & 0xFF;
     
-    uint8_t payload_buf[GB_MAX_PACKET_LEN];
+    uint8_t payload_buf[256]; // ASTM Message Pack 可能较长，扩大缓冲区
     int payload_len = 0;
-    
-    // ✅ 【核心修复】根据 s_encode_mode 动态选择编码方式
-    if (s_encode_mode == RID_EncodeMode::MODE_GB46750_ONLY || s_encode_mode == RID_EncodeMode::MODE_DUAL) {
+    bool need_prefix_counter = false; 
+
+    // 1. 根据模式编码 Payload
+    if (s_encode_mode == RID_EncodeMode::MODE_GB46750_ONLY) {
         payload_len = GB46750Encoder::encode(data, payload_buf, sizeof(payload_buf));
+        need_prefix_counter = true; 
     } 
     else if (s_encode_mode == RID_EncodeMode::MODE_RID_ONLY) {
-        // TODO: 未来在这里调用 ASTMEncoder::encode(data, payload_buf, sizeof(payload_buf));
-        // 目前由于 ASTM 编码器尚未实现，我们暂时用 GB 编码器占位，但修改 OUI Type 以示区别
-        ESP_LOGW(TAG, "ASTM RID_ONLY mode selected. (Fallback to GB46750 payload for now)");
+        // ✅ 【核心修复】将 RIDData 桥接映射为 ASTM 子结构体
+        
+        // 1.1 Basic ID
+        RIDBasicID basic_id = {};
+        basic_id.ua_type = RID_UA_HELICOPTER; // 默认多旋翼/直升机
+        basic_id.id_type = RID_ID_SERIAL_NO;
+        strncpy(basic_id.uas_id, data.uas_id, sizeof(basic_id.uas_id) - 1);
+
+        // 1.2 Location
+        RIDLocation location = {};
+        location.status = RID_STATUS_AIRBORNE; 
+        location.direction = data.track_deg;
+        location.speed_h = data.ground_speed_ms;
+        location.speed_v = data.vert_speed_ms;
+        location.latitude = data.lat;
+        location.longitude = data.lon;
+        location.altitude_baro = data.baro_alt_m;
+        location.altitude_geo = data.geo_alt_m;
+        location.height = data.rel_alt_m;
+        location.height_is_above_ground = true;
+        location.acc_horiz = RID_ACC_10M;
+        location.acc_vert = RID_ACC_10M;
+        location.acc_baro = RID_ACC_10M;
+        location.acc_speed = RID_ACC_10M;
+        location.acc_ts = RID_ACC_0_1NM;
+        // ASTM 要求 timestamp 是 10分钟内的秒数 (0-3600)
+        location.timestamp_sec = (data.timestamp_ms % 3600000) / 1000.0f; 
+
+        // 1.3 System (Operator Location)
+        RIDSystem system = {};
+        system.op_loc_type = RIDSystem::TAKEOFF;
+        system.op_latitude = data.gcs_lat;
+        system.op_longitude = data.gcs_lon;
+        system.op_altitude_geo = data.gcs_alt;
+        system.category_eu = static_cast<RIDSystem::CategoryEU>(data.op_category);
+        system.class_eu = static_cast<RIDSystem::ClassEU>(data.ua_class);
+        system.timestamp_full = data.timestamp_ms / 1000;
+        system.area_count = 1;
+        system.area_radius = 50;
+        system.area_ceiling = 120;
+        system.area_floor = 0;
+
+        // 1.4 Operator ID
+        RIDOperatorID op_id = {};
+        op_id.id_type = RIDOperatorID::CAA_ID;
+        strncpy(op_id.operator_id, data.reg_mark, sizeof(op_id.operator_id) - 1);
+
+        // 1.5 调用 ASTM 编码器
+        payload_len = RID_Encoder::encodePayload(
+            payload_buf, Counter, 
+            &basic_id, location, &system, &op_id
+        );
+        need_prefix_counter = false; // ASTM encodePayload 内部已经处理了 counter 和 message pack 头部
+    } 
+    else {
+        ESP_LOGW(TAG, "Invalid mode, fallback to GB46750");
         payload_len = GB46750Encoder::encode(data, payload_buf, sizeof(payload_buf));
+        need_prefix_counter = true;
     }
 
     if (payload_len <= 0) { 
@@ -341,8 +399,10 @@ bool WiFi_TX::transmit(const RIDData &data) {
         return false; 
     }
 
-    const size_t ie_payload_len = 1 + payload_len;
-    const size_t ie_size = sizeof(vendor_ie_data_t) + ie_payload_len;
+    // 2. 组装 Vendor IE (单槽位)
+    size_t ie_payload_len = need_prefix_counter ? (1 + payload_len) : payload_len;
+    size_t ie_size = sizeof(vendor_ie_data_t) + ie_payload_len;
+    
     vendor_ie_data_t *ie = static_cast<vendor_ie_data_t *>(malloc(ie_size));
     if (!ie) return false;
 
@@ -350,17 +410,22 @@ bool WiFi_TX::transmit(const RIDData &data) {
     ie->vendor_oui[0] = RID_OUI_0; 
     ie->vendor_oui[1] = RID_OUI_1; 
     ie->vendor_oui[2] = RID_OUI_2;
-    
-    // 如果是 ASTM 模式，Type 通常不同 (例如 0x0D 是 ASTM Message Pack)
-    ie->vendor_oui_type = (s_encode_mode == RID_EncodeMode::MODE_RID_ONLY) ? 0x01 : RID_OUI_TYPE; 
+    ie->vendor_oui_type = RID_OUI_TYPE; 
     ie->length = static_cast<uint8_t>(4 + ie_payload_len);
     
-    ie->payload[0] = Counter;
-    memcpy(ie->payload + 1, payload_buf, payload_len);
+    // 3. 填充 Payload
+    if (need_prefix_counter) {
+        ie->payload[0] = Counter;
+        memcpy(ie->payload + 1, payload_buf, payload_len);
+    } else {
+        // ASTM 模式：encodePayload 返回的已经是完整的 Message Pack (包含头部和所有消息)
+        memcpy(ie->payload, payload_buf, payload_len);
+    }
 
-    // 打印日志，方便观察模式切换是否生效
+    // 调试打印
     if (Counter == 0x01) printVendorIE(ie);
 
+    // 4. 注入 Beacon 和 Probe Response
     esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie);
     bool ok = (esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie) == ESP_OK);
     
