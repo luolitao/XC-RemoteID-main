@@ -5,6 +5,22 @@
 #pragma once
 
 #include <stdint.h>
+// ── 参数键名常量 ──────────────────────────────────────────────────────────────
+#define PARAM_UAS_ID        "UAS_ID"       // 唯一产品识别码（20字节）
+#define PARAM_REG_MARK      "REG_MARK"     // 实名登记标志后8位
+#define PARAM_OP_CATEGORY   "OP_CATEGORY"  // 运行类别 0~3
+#define PARAM_UA_CLASS      "UA_CLASS"     // 无人机分类 0~4
+#define PARAM_WIFI_CH       "WIFI_CH"      // Wi-Fi 信道（1~13）
+#define PARAM_CONFIGURED    "CONFIGURED"   // 首次配置完成标志
+
+// ... 原有宏定义 ...
+#define PARAM_GCS_LAT     "gcs_lat"
+#define PARAM_GCS_LON     "gcs_lon"
+#define PARAM_GCS_ALT     "gcs_alt"
+#define PARAM_FLIGHT_SPEED "flt_spd"
+#define PARAM_ORBIT_RADIUS "orb_rad"
+#define PARAM_ENCODE_MODE "enc_mode"
+#define PARAM_DEVICE_MAC "dev_mac"
 
 class Parameters {
 public:
@@ -25,7 +41,8 @@ public:
     static float get_float(const char *key, float default_val);
     // 常用参数快捷访问
 
-    static uint32_t get_baudrate();
+    static bool get_mac(uint8_t* mac);
+    static void set_mac(const uint8_t* mac);
 
     // 恢复出厂默认
     static void factory_reset();
@@ -34,17 +51,3 @@ private:
     static void load_defaults();
 };
 
-// ── 参数键名常量 ──────────────────────────────────────────────────────────────
-#define PARAM_UAS_ID        "UAS_ID"       // 唯一产品识别码（20字节）
-#define PARAM_REG_MARK      "REG_MARK"     // 实名登记标志后8位
-#define PARAM_OP_CATEGORY   "OP_CATEGORY"  // 运行类别 0~3
-#define PARAM_UA_CLASS      "UA_CLASS"     // 无人机分类 0~4
-#define PARAM_WIFI_CH       "WIFI_CH"      // Wi-Fi 信道（1~13）
-#define PARAM_CONFIGURED    "CONFIGURED"   // 首次配置完成标志
-
-// ... 原有宏定义 ...
-#define PARAM_GCS_LAT     "gcs_lat"
-#define PARAM_GCS_LON     "gcs_lon"
-#define PARAM_GCS_ALT     "gcs_alt"
-#define PARAM_FLIGHT_SPEED "flt_spd"
-#define PARAM_ORBIT_RADIUS "orb_rad"

@@ -1,9 +1,11 @@
-#include "mock_data.h"
-#include "parameters.h" 
 #include <math.h>
 #include <string.h>
 #include "esp_log.h"
 #include "esp_timer.h" // 【关键新增】引入 ESP-IDF 高精度定时器
+#include "esp_mac.h" // 确保顶部引入
+
+#include "mock_data.h"
+#include "parameters.h" 
 
 static const char* TAG = "MOCK_DATA";
 
@@ -37,8 +39,24 @@ void MockData::init(RIDData &data)
     // 1. 读取身份参数
     const char* uas_id = Parameters::get_str(PARAM_UAS_ID);
     const char* reg_mark = Parameters::get_str(PARAM_REG_MARK);
-    snprintf(data.uas_id, sizeof(data.uas_id), "%s", strlen(uas_id) > 0 ? uas_id : "ESP32MOCKSIMBD1234AB");
-    snprintf(data.reg_mark, sizeof(data.reg_mark), "%s", strlen(reg_mark) > 0 ? reg_mark : "MOCK0001");
+    
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+
+    // ✅ 基于硬件 MAC 生成唯一的默认 UAS ID (例: ESP32MOCK-1A2B3C)
+    if (strlen(uas_id) == 0) {
+        snprintf(data.uas_id, sizeof(data.uas_id), "ESP32MOCK-%02X%02X%02X", mac[3], mac[4], mac[5]);
+    } else {
+        snprintf(data.uas_id, sizeof(data.uas_id), "%s", uas_id);
+    }
+
+    // ✅ 基于硬件 MAC 生成唯一的默认 Reg Mark (例: RID-2B3C)
+    if (strlen(reg_mark) == 0) {
+        snprintf(data.reg_mark, sizeof(data.reg_mark), "RID-%02X%02X", mac[4], mac[5]);
+    } else {
+        snprintf(data.reg_mark, sizeof(data.reg_mark), "%s", reg_mark);
+    }
+
 
     // 2. 读取分类参数
     data.op_category  = static_cast<GBOpCategory>(Parameters::get_uint8(PARAM_OP_CATEGORY));

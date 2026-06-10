@@ -3,8 +3,6 @@
 # ==========================================
 CONFIG_FREERTOS_UNICORE=y
 CONFIG_FREERTOS_HZ=1000
-# 修复 ESP-IDF 5.x 的 Flash 大小识别
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
 # ==========================================
 # 蓝牙配网核心配置 (NimBLE 极简模式)
@@ -35,9 +33,6 @@ CONFIG_BT_NIMBLE_NVS_PERSIST=n       # 关闭 NVS 持久化 (消除 IRKs 报错)
 CONFIG_BT_NIMBLE_SM_BONDING=0        # 禁用绑定
 CONFIG_BT_NIMBLE_SM_SC=0             # 禁用安全连接 (Secure Connections)
 CONFIG_BT_NIMBLE_SM_LEGACY=0         # 禁用传统配对
-
-# Wi-Fi 与 BLE 软件共存 (单核必备)
-CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
 # Wi-Fi 与 BLE 软件共存 (单核必备)
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y

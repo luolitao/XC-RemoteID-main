@@ -3,8 +3,6 @@
  * 彻底移除 Arduino Preferences 库，直接使用底层 nvs_flash API
  */
 
-#include "parameters.h"
-
 // ==========================================
 // ESP-IDF NVS 头文件
 // ==========================================
@@ -13,8 +11,11 @@
 #include "esp_log.h"
 #include <string.h>
 
-static const char* TAG = "PARAM";
+#include "parameters.h"
+
 #define NVS_NAMESPACE "xc-rid"
+
+static const char* TAG = "PARAM";
 
 // ==========================================
 // 辅助函数：安全打开 NVS 句柄
@@ -68,8 +69,14 @@ void Parameters::load_defaults()
 
     nvs_set_str(handle, PARAM_UAS_ID, "");
     nvs_set_str(handle, PARAM_REG_MARK, "");
-    nvs_set_u8(handle, PARAM_OP_CATEGORY, 1);   // 开放类
-    nvs_set_u8(handle, PARAM_UA_CLASS, 1);      // 轻型
+    nvs_set_u8(handle, PARAM_OP_CATEGORY, 1);   
+    nvs_set_u8(handle, PARAM_UA_CLASS, 1);      
+    
+    // ✅ 新增：默认使用 GB46750 模式 (0)
+    nvs_set_u8(handle, PARAM_ENCODE_MODE, 0);   
+
+    nvs_set_u8(handle, PARAM_WIFI_CH, 6);
+
     
     // 【新增】写入默认起飞点坐标 (广州越秀区)
     float lat = 23.1429f, lon = 113.2602f, alt = 14.0f;
@@ -83,8 +90,10 @@ void Parameters::load_defaults()
     nvs_set_u8(handle, PARAM_WIFI_CH, 6);
 
     
-    nvs_commit(handle);
+    // 【关键】不写 PARAM_CONFIGURED，保持未配置状态
+    nvs_commit(handle); 
     nvs_close(handle);
+
     ESP_LOGI(TAG, "Default parameters loaded and committed.");
 }
 
@@ -201,4 +210,21 @@ void Parameters::factory_reset()
     
     // 重新加载默认值
     load_defaults();
+}
+
+bool Parameters::get_mac(uint8_t* mac) {
+    nvs_handle_t handle = open_nvs(NVS_READONLY);
+    if (!handle) return false;
+    size_t len = 6;
+    esp_err_t err = nvs_get_blob(handle, PARAM_DEVICE_MAC, mac, &len);
+    nvs_close(handle);
+    return (err == ESP_OK && len == 6);
+}
+
+void Parameters::set_mac(const uint8_t* mac) {
+    nvs_handle_t handle = open_nvs(NVS_READWRITE);
+    if (!handle) return;
+    nvs_set_blob(handle, PARAM_DEVICE_MAC, mac, 6);
+    nvs_commit(handle);
+    nvs_close(handle);
 }
