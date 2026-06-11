@@ -182,7 +182,7 @@ esp_err_t WebServer::_handle_get_config(httpd_req_t *req) {
     // UAS ID Fallback
     const char* uas_id = Parameters::get_str(PARAM_UAS_ID);
     if (strlen(uas_id) == 0) {
-        char def[21]; snprintf(def, sizeof(def), "ESP32-%02X%02X%02X", mac[3], mac[4], mac[5]);
+        char def[21]; snprintf(def, sizeof(def), "ESP32-MOCK-%02X%02X%02X", mac[3], mac[4], mac[5]);
         cJSON_AddStringToObject(root, "uas_id", def);
     } else { cJSON_AddStringToObject(root, "uas_id", uas_id); }
 
@@ -225,22 +225,62 @@ esp_err_t WebServer::_handle_post_config(httpd_req_t *req) {
     if (!body) return _send_error(req, 400, "Invalid JSON");
 
     cJSON* item;
+    bool data_changed = false; // ✅ 追踪是否有数据被修改
+
+    // 1. 解析并写入 NVS
     if ((item = cJSON_GetObjectItem(body, "encode_mode")) && cJSON_IsNumber(item)) {
         RID_EncodeMode new_mode = static_cast<RID_EncodeMode>(item->valueint);
         WiFi_TX::setEncodeMode(new_mode);
         Parameters::set_uint8(PARAM_ENCODE_MODE, item->valueint);
+        data_changed = true;
     }
-    if ((item = cJSON_GetObjectItem(body, "uas_id")) && cJSON_IsString(item)) Parameters::set_str(PARAM_UAS_ID, item->valuestring);
-    if ((item = cJSON_GetObjectItem(body, "reg_mark")) && cJSON_IsString(item)) Parameters::set_str(PARAM_REG_MARK, item->valuestring);
-    if ((item = cJSON_GetObjectItem(body, "op_category")) && cJSON_IsNumber(item)) Parameters::set_uint8(PARAM_OP_CATEGORY, item->valueint);
-    if ((item = cJSON_GetObjectItem(body, "ua_class")) && cJSON_IsNumber(item)) Parameters::set_uint8(PARAM_UA_CLASS, item->valueint);
-    if ((item = cJSON_GetObjectItem(body, "takeoff_lat")) && cJSON_IsNumber(item)) Parameters::set_float(PARAM_GCS_LAT, item->valuedouble);
-    if ((item = cJSON_GetObjectItem(body, "takeoff_lon")) && cJSON_IsNumber(item)) Parameters::set_float(PARAM_GCS_LON, item->valuedouble);
-    if ((item = cJSON_GetObjectItem(body, "takeoff_alt")) && cJSON_IsNumber(item)) Parameters::set_float(PARAM_GCS_ALT, item->valuedouble);
-    if ((item = cJSON_GetObjectItem(body, "flight_speed")) && cJSON_IsNumber(item)) Parameters::set_float(PARAM_FLIGHT_SPEED, item->valuedouble);
-    if ((item = cJSON_GetObjectItem(body, "orbit_radius")) && cJSON_IsNumber(item)) Parameters::set_float(PARAM_ORBIT_RADIUS, item->valuedouble);
+    if ((item = cJSON_GetObjectItem(body, "uas_id")) && cJSON_IsString(item)) {
+        Parameters::set_str(PARAM_UAS_ID, item->valuestring);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "reg_mark")) && cJSON_IsString(item)) {
+        Parameters::set_str(PARAM_REG_MARK, item->valuestring);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "op_category")) && cJSON_IsNumber(item)) {
+        Parameters::set_uint8(PARAM_OP_CATEGORY, item->valueint);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "ua_class")) && cJSON_IsNumber(item)) {
+        Parameters::set_uint8(PARAM_UA_CLASS, item->valueint);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "takeoff_lat")) && cJSON_IsNumber(item)) {
+        Parameters::set_float(PARAM_GCS_LAT, item->valuedouble);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "takeoff_lon")) && cJSON_IsNumber(item)) {
+        Parameters::set_float(PARAM_GCS_LON, item->valuedouble);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "takeoff_alt")) && cJSON_IsNumber(item)) {
+        Parameters::set_float(PARAM_GCS_ALT, item->valuedouble);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "flight_speed")) && cJSON_IsNumber(item)) {
+        Parameters::set_float(PARAM_FLIGHT_SPEED, item->valuedouble);
+        data_changed = true;
+    }
+    if ((item = cJSON_GetObjectItem(body, "orbit_radius")) && cJSON_IsNumber(item)) {
+        Parameters::set_float(PARAM_ORBIT_RADIUS, item->valuedouble);
+        data_changed = true;
+    }
     
-    MockData::reload(mock_rid_data); // 热更新生效
+    // ✅ 【核心修复】只要用户成功修改了配置，就立刻将设备标记为“已配置”！
+    // 这样下次重启时，Parameters::init() 就不会再调用 load_defaults() 覆盖数据了。
+    if (data_changed) {
+        Parameters::set_uint8(PARAM_CONFIGURED, 1);
+        ESP_LOGI(TAG, "Config updated and marked as CONFIGURED in NVS.");
+    }
+
+    // 2. 触发热更新
+    MockData::reload(mock_rid_data); 
+    
     cJSON_Delete(body);
     return _send_json(req, "{\"status\":0,\"msg\":\"Config applied & hot-reloaded\"}");
 }

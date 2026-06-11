@@ -40,10 +40,10 @@ void Parameters::init()
     }
     ESP_ERROR_CHECK(err);
 
-    // 【核心逻辑】检查设备是否已经通过蓝牙配网保存过数据
+    // ✅ 【核心修复】只有当 PARAM_CONFIGURED 不为 1 时，才加载默认值
     if (!is_configured()) {
         ESP_LOGI(TAG, "Device not configured (Factory state), loading empty defaults...");
-        load_defaults(); // 修正：调用现有的 load_defaults()
+        load_defaults(); // 确保这里调用的是 load_defaults()
     } else {
         ESP_LOGI(TAG, "Configuration loaded from NVS successfully. User data is safe.");
     }
